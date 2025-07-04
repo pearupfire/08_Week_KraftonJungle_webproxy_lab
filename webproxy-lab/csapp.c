@@ -42,7 +42,7 @@ void posix_error(int code, char *msg) /* Posix-style error */
     exit(0);
 }
 
-void gai_error(int code, char *msg) /* Getaddrinfo-style error */
+void gai_error_exit(int code, char *msg) /* Getaddrinfo-style error */
 {
     fprintf(stderr, "%s: %s\n", msg, gai_strerror(code));
     exit(0);
@@ -605,7 +605,7 @@ void Getaddrinfo(const char *node, const char *service,
     int rc;
 
     if ((rc = getaddrinfo(node, service, hints, res)) != 0) 
-        gai_error(rc, "Getaddrinfo error");
+        gai_error_exit(rc, "Getaddrinfo error");
 }
 /* $end getaddrinfo */
 
@@ -616,7 +616,7 @@ void Getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host,
 
     if ((rc = getnameinfo(sa, salen, host, hostlen, serv, 
                           servlen, flags)) != 0) 
-        gai_error(rc, "Getnameinfo error");
+        gai_error_exit(rc, "Getnameinfo error");
 }
 
 void Freeaddrinfo(struct addrinfo *res)
@@ -1046,26 +1046,103 @@ int open_listenfd(char *port)
 /****************************************************
  * Wrappers for reentrant protocol-independent helpers
  ****************************************************/
+
+/// @brief 주어진 호스트명과 포트 번호를 사용해 TCP 클라이언트 소켓을 생성하고 서버에 연결을 시도하는 함수
+/// @param hostname 서버의 도메인 이름 또는 IP 주소
+/// @param port 서버의 포트 번호
+/// @return 성공 시 연결된 소켓 디스크립터, 실패 시 -1
 int Open_clientfd(char *hostname, char *port) 
 {
-    int rc;
+    int clientfd;
+    struct addrinfo hints, *listp, *p;
 
-    if ((rc = open_clientfd(hostname, port)) < 0) 
-	unix_error("Open_clientfd error");
-    return rc;
+    // memset() : 메모리 블록을 특정 값으로 초기화 구조체나 배열을 0으로 초기화 할 때 사용
+    // hints 구조체를 0으로 초기화하고, 연결에 사용할 조건 설정
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_socktype = SOCK_STREAM; // TCP 연결 사용
+    hints.ai_flags = AI_NUMERICSERV; // 포트를 숫자로 간주
+    hints.ai_flags |= AI_ADDRCONFIG; // 시스템 IP 구성 
+    
+    // Getaddrinfo() : 도메인 이름과 포트를 소켓 프로그래밍에서 사용할 수 있는 struct addrinfo 리스트로 바꾸는 함수
+    Getaddrinfo(hostname, port, &hints, &listp); // 도메인 이름과 포트를 기반으로 연결 가능한 주소 리스트륵 가지고온다.
+
+    // 주소 리스트를 순회하며 연결을 시도
+    for (p = listp; p; p = p->ai_next)
+    {
+        // 소켓 생성 시도
+        if ((clientfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0)
+            continue; // 실패하면 다음 주소로
+
+        // 생성한 소켓으로 연결 시도
+        if ((connect(clientfd, p->ai_addr, p->ai_addrlen)) != -1)
+            break; // 성공 시 다음 주소로
+        
+        // 연결 실패 시 소켓 닫기
+        Close(clientfd);
+    }
+    
+    // Freeaddrinfo() : getaddrinfo() 함수로 동적으로 할당된 메모리를 해제하는 함수
+    // 동적으로 할당된 주소 리스트 해제
+    Freeaddrinfo(listp);
+    
+    // 연결 성공 여부에 따라 결과를 반환
+    if (!p)
+        return -1; // 실패 시 -1 리턴
+    else
+        return clientfd; // 연결된 소켓 디스크립터 반환
 }
 
+/// @brief 지정한 포트 번호를 리스능 소켓을 열고, 연결 요청을 받을 준비하는 함수
+/// @param port 바인딩할 포트 번호
+/// @return 성공 시 리스닝 소켓 디스크립터, 실패 시 -1
 int Open_listenfd(char *port) 
 {
-    int rc;
+    struct addrinfo hints, *listp, *p; // 주소 정보 요청용 구조체와 결과 리스트 포인터
+    int listenfd, optval = 1; // 리스닝 소켓, 옵션 값
 
-    if ((rc = open_listenfd(port)) < 0)
-	unix_error("Open_listenfd error");
-    return rc;
+    memset(&hints, 0, sizeof(struct addrinfo)); // hints 초기화, 원하는 주소 타입 설정
+    hints.ai_socktype = SOCK_STREAM; // TCP 소켓
+    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG; // 서버용 주소, 사용 가능한 주소만
+    hints.ai_flags |= AI_NUMERICSERV; // 포트 숫자만 허용
+
+    // NULL = 로컬 IP 주소로 바인딩
+    Getaddrinfo(NULL, port, &hints, &listp); // 포트에 해당하는 주소 리스트 가져오기
+
+    // listp에 있는 주소 리스트를 하나씩 순회
+    for (p = listp; p; p = p->ai_next)
+    {   
+        // 소켓 생성
+        if ((listenfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0)
+            continue; // 실패 시 다음 주소로 이동
+        
+        // 소켓 옵션 설정: TIME_WAIT 상태에서도 재사용 가능하도록 설정
+        Setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval, sizeof(int));
+
+        // bind() : 소켓 IP주소와 포트 번호를 할당해서, 해당 주소에서 데이터를 받을 준비를 하는 함수
+        // 소켓을 해당 주소에 바인딩
+        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0)
+            break; // 성공하면 종료
+
+        Close(listenfd); // 바인딩 실패 시 소켓 닫고 다음 주소 시도
+    }
+
+    // 동적 할당된 주소 리스트 해제
+    Freeaddrinfo(listp);
+
+    // 모든 주소에서 실패했다면 -1 반환
+    if (!p)
+        return -1;
+    
+    // listen() : 서버 소켓을 연결 요청 대기 상태로 만드는 함수 성공 시 0 반환, 실패 시 -1 반환
+    // 리스닝 소켓으로 설정 (클리이언트 요청 대기)
+    if (listen(listenfd, LISTENQ) < 0)
+    {
+        Close(listenfd);
+        return -1;
+    }
+
+    // 성공 시 리스닝 소켓 생성 완료 및 리턴
+    return listenfd;
 }
 
 /* $end csapp.c */
-
-
-
-
