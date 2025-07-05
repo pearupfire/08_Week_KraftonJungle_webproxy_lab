@@ -1064,7 +1064,7 @@ int Open_clientfd(char *hostname, char *port)
     hints.ai_flags |= AI_ADDRCONFIG; // 시스템 IP 구성 
     
     // Getaddrinfo() : 도메인 이름과 포트를 소켓 프로그래밍에서 사용할 수 있는 struct addrinfo 리스트로 바꾸는 함수
-    Getaddrinfo(hostname, port, &hints, &listp); // 도메인 이름과 포트를 기반으로 연결 가능한 주소 리스트륵 가지고온다.
+    Getaddrinfo(hostname, port, &hints, &listp); // 도메인 이름과 포트를 기반으로 연결 가능한 주소 리스트를 가지고온다.
 
     // 주소 리스트를 순회하며 연결을 시도
     for (p = listp; p; p = p->ai_next)

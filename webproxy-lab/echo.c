@@ -16,7 +16,7 @@ void echo(int connfd)
     {
         // 수신한 바이트 출력
         printf("server received %d bytes \n", (int)n);
-        // 받은 대아토룰 그대로 클라리언트에 전송
+        // 받은 데이터룰 그대로 클라리언트에 전송
         Rio_writen(connfd, buf, n);
     }
 }
