@@ -11,7 +11,7 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, char *method);
 void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
@@ -66,7 +66,7 @@ void doit(int fd)
   sscanf(buf, "%s %s %s", method, uri, version); // 요청 라인을 파싱해서 저장
 
   // 지원하지 않는 메서드일 경우 
-  if (strcasecmp(method, "GET"))
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD"))
   {
     // 501 에러 응답 반환
     clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
@@ -98,7 +98,7 @@ void doit(int fd)
     }
 
     // 정적 파일을 클라이언트에게 전송
-    serve_static(fd, filename, sbuf.st_size);
+    serve_static(fd, filename, sbuf.st_size, method);
   }
 
   // 동적 컨텐츠 요청인 경우
@@ -212,31 +212,66 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
 /// @param fd 클라이언트와 연결된 파일 디스크립터
 /// @param filename 전송할 파일 이름
 /// @param filesize 전송할 파일 크기
-void serve_static(int fd, char *filename, int filesize)
+// void serve_static(int fd, char *filename, int filesize)
+// {
+//   int srcfd;  // 파일 디스크립터
+//   // 메모리에 매핑된 파일 포인터, MIME Typm 저장용 버퍼, HTTP 응답 헤더 작성 버퍼
+//   char *srcp, filetype[MAXLINE], buf[MAXBUF]; 
+//  
+//   // 파일 확장자에 따른 콘텐츠 타입 설정
+//   get_filetype(filename, filetype);
+//
+//   // HTTP 응답 헤더 작성
+//   sprintf(buf, "HTTP/1.0 200 OK\r\n");                  // 상태 라인
+//   sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);   // 서버 정보
+//   sprintf(buf, "%sConnection: close\r\n", buf);         // 연결 종료 알림
+//   sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);  // 본문 길이
+//   sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);// 콘텐츠 타입 및 헤더 끝
+//  
+//   // 클라이언트에 헤더 전송
+//   Rio_writen(fd, buf, strlen(buf)); 
+//
+//   srcfd = Open(filename, O_RDONLY, 0); // 파일을 읽기 전용으로 오픈
+//   srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 파일을 메모리에 메핑
+//   Close(srcfd); // 파일 디스크립터 닫기
+//
+//   Rio_writen(fd, srcp, filesize); // 매핑된 파일 내용을 클라이언트에 전송
+//   Munmap(srcp, filesize); // 메모리 매핑 해제
+// }
+
+void serve_static(int fd, char *filename, int filesize, char *method)
 {
   int srcfd;  // 파일 디스크립터
-  // 메모리에 매핑된 파일 포인터, MIME Typm 저장용 버퍼, HTTP 응답 헤더 작성 버퍼
   char *srcp, filetype[MAXLINE], buf[MAXBUF]; 
   
-  // 파일 확장자에 따른 콘텐츠 타입 설정
   get_filetype(filename, filetype);
 
-  // HTTP 응답 헤더 작성
-  sprintf(buf, "HTTP/1.0 200 OK\r\n");                  // 상태 라인
-  sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);   // 서버 정보
-  sprintf(buf, "%sConnection: close\r\n", buf);         // 연결 종료 알림
-  sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);  // 본문 길이
-  sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);// 콘텐츠 타입 및 헤더 끝
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");                 
+  sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);  
+  sprintf(buf, "%sConnection: close\r\n", buf);         
+  sprintf(buf, "%sContent-length: %d\r\n", buf, filesize); 
+  sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
   
-  // 클라이언트에 헤더 전송
   Rio_writen(fd, buf, strlen(buf)); 
+ 
+  if (strcasecmp(method, "HEAD") == 0)
+    return;
 
-  srcfd = Open(filename, O_RDONLY, 0); // 파일을 읽기 전용으로 오픈
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 파일을 메모리에 메핑
-  Close(srcfd); // 파일 디스크립터 닫기
+  srcfd = Open(filename, O_RDONLY, 0); 
+  srcp = malloc(filesize); // 파일 크기만큼 동적 할당
+  
+  // malloc 실패 시 예외처리
+  if (!srcp)
+  {
+    Close(srcfd);
+    fprintf(stderr, "Error: malloc falied\n");
+    return;
+  }
 
-  Rio_writen(fd, srcp, filesize); // 매핑된 파일 내용을 클라이언트에 전송
-  Munmap(srcp, filesize); // 메모리 매핑 해제
+  Rio_readn(srcfd, srcp, filesize); // 파일 내용 메모리 버퍼에 읽어옴
+  Close(srcfd); 
+  Rio_writen(fd, srcp, filesize);  // 파일 내용 클라이언트에게 전송
+  free(srcp); // 동적 메모리 해제
 }
 
 /// @brief CGI 프로그램을 실행하여 동적 콘텐츠를 클라이언트에게 전송하는 함수
@@ -283,6 +318,8 @@ void get_filetype(char *filename, char *filetype)
       // .jpg 있다면 -> MIME Type을 image/jpeg로 설정
   else if (strstr(filename, ".jpg"))
     strcpy(filetype, "image/jpeg");
+  else if (strstr(filename, ".mp4"))
+    strcpy(filetype, "video/mp4");
       // 위에 해당하지 않다면 모든 파일을 text/plain으로 설정
   else
     strcpy(filetype, "text/plain");
