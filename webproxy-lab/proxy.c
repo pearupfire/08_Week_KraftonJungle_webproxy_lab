@@ -141,7 +141,7 @@ void proxy(int fd)
     return;
   }
   
-    if (cache_find(uri, cache_buf, &cache_size) == 0)
+  if (cache_find(uri, cache_buf, &cache_size) == 0)
   {
     Rio_writen(fd, cache_buf, cache_size);
     return;
@@ -230,7 +230,8 @@ void build_http_request(char *http_request, char *hostname, char *path, rio_t *c
 /// @param path 파싱된 경로 저장 버퍼
 /// @param port 파싱된 포트 저장 버퍼
 /// @return 성공 시 0, 실패 시 -1
-int parse_uri(const char *uri, char *hostname, char *path, char *port) {
+int parse_uri(const char *uri, char *hostname, char *path, char *port)
+{
     char uri_copy[MAXLINE];
     strcpy(uri_copy, uri);
 
@@ -239,19 +240,27 @@ int parse_uri(const char *uri, char *hostname, char *path, char *port) {
 
     char *hostbegin = uri_copy + 7;
     char *pathbegin = strchr(hostbegin, '/');
-    if (pathbegin) {
+    char *portbegin = strchr(hostbegin, ':');
+
+    if (pathbegin) 
+    {
         strcpy(path, pathbegin);
         *pathbegin = '\0';
-    } else {
+    } 
+    else 
+    {
         strcpy(path, "/");
     }
 
-    char *portbegin = strchr(hostbegin, ':');
-    if (portbegin) {
+    
+    if (portbegin) 
+    {
         *portbegin = '\0';
         strcpy(hostname, hostbegin);
         strcpy(port, portbegin + 1);
-    } else {
+    } 
+    else 
+    {
         strcpy(hostname, hostbegin);
         strcpy(port, "80");
     }
