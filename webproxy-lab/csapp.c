@@ -1075,7 +1075,7 @@ int Open_clientfd(char *hostname, char *port)
 
         // 생성한 소켓으로 연결 시도
         if ((connect(clientfd, p->ai_addr, p->ai_addrlen)) != -1)
-            break; // 성공 시 다음 주소로
+            break; // 성공 시 브레이크
         
         // 연결 실패 시 소켓 닫기
         Close(clientfd);
@@ -1105,7 +1105,7 @@ int Open_listenfd(char *port)
     hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG; // 서버용 주소, 사용 가능한 주소만
     hints.ai_flags |= AI_NUMERICSERV; // 포트 숫자만 허용
 
-    // NULL = 로컬 IP 주소로 바인딩
+    // NULL = 0.0.0.0 모든 IP주소에서 요청 받을 수 있게 준비
     Getaddrinfo(NULL, port, &hints, &listp); // 포트에 해당하는 주소 리스트 가져오기
 
     // listp에 있는 주소 리스트를 하나씩 순회
