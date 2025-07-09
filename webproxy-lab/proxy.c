@@ -19,18 +19,20 @@ void cache_update_lru(int index);
 int cache_find(char *uri, char *buf, size_t * size);
 void cache_init();
 
+// 개별 캐시 블록을 나타내는 구조채
 typedef struct {
-  char uri[MAXLINE];
-  char buf[MAX_OBJECT_SIZE];
-  size_t size;
-  int used;
-  int lru;
+  char uri[MAXLINE]; // 요청된 객체의 URI
+  char buf[MAX_OBJECT_SIZE]; // 캐시된 실제 객체 데이터 
+  size_t size; // 객체의 크기
+  int used; // 해당 캐시 블록이 현재 사용중인 여부 (1 사용, 0 사용 안함)
+  int lru; // LRU (least Recenyly Used) 번호 -> 작을 수록 최근에 사용
 } cache_block;
 
+// 전체 캐시를 나타내는 구조체
 typedef struct {
-  cache_block blocks[MAX_CACHE_BLOCK];
-  size_t total_size;
-  pthread_rwlock_t lock;
+  cache_block blocks[MAX_CACHE_BLOCK]; // 여러 개의 캐시 블록 배열
+  size_t total_size; // 현재 캐시에 저장된 총 객체 크기
+  pthread_rwlock_t lock; // 캐시 접근을 위한 읽기-쓰기 락 (동시성 제어)
 } cache_t;
 
 cache_t cache;
@@ -272,67 +274,93 @@ void *thread(void *vargp)
   return NULL;
 }
 
+/// @brief 캐시 초기화 함수
 void cache_init() 
 {
-  cache.total_size = 0;
-  pthread_rwlock_init(&cache.lock, NULL);
+  cache.total_size = 0; // 전채 캐시 크기 0
+  pthread_rwlock_init(&cache.lock, NULL); // 읽기 쓰기 락 초기화
 
-  for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+  for (int i = 0; i < MAX_CACHE_BLOCK; i++) //각 캐시 블록 초기화
     cache.blocks[i].used = 0;
 }
 
-int cache_find(char *uri, char *buf, size_t * size)
+/// @brief 캐시에 해당 URI 존재하는지 확인
+/// @param uri 요청된 URI
+/// @param buf 캐시된 객체 데이터 복사할 버퍼
+/// @param size 복사된 객체으 크기 저장 변수
+/// @return hit 0, miss -1
+int cache_find(char *uri, char *buf, size_t *size)
 {
-  int found = -1;
-  pthread_rwlock_rdlock(&cache.lock);
-
+  int found = -1; 
+  pthread_rwlock_rdlock(&cache.lock); // 읽기 락 획득 -> 여러 스레드가 동시에 캐시를 읽을 수 있도록 허용
+  
+  // 캐시 블록들을 순회하면서 URI가 일치하는 항목 탐색
   for (int i = 0; i < MAX_CACHE_BLOCK; i++)
   {
+    // 해당 블록이 사용중이며 URI가 일치하는 경우
     if (cache.blocks[i].used && strcmp(cache.blocks[i].uri, uri) == 0)
     {
+      // 캐시된 데이터를 요청한 버퍼로 복사
       memcpy(buf, cache.blocks[i].buf, cache.blocks[i].size);
+      // 해당 개게의 크기를 반환할 포인터에 저장
       *size = cache.blocks[i].size;
+      // LRU 갱신 -> 해당 블록이 최근에 사용되었음을 기록
       cache_update_lru(i);
-      found = 0; 
+      found = 0; // hit
       break;
     }
   }
-  
-  pthread_rwlock_unlock(&cache.lock);
-  return found;
+
+  pthread_rwlock_unlock(&cache.lock); // -> 읽기 락 해제
+  return found; // hit 0, miss -1
 }
 
+/// @brief LRU 정책을 기반으로 캐시 블록의 사용 순서 갱신
+/// @param index 최근에 접근한 캐시 블록의 인덱스
 void cache_update_lru(int index)
 {
+  // 현재 접근한 블록의 기존 LRU 값 저장
   int old = cache.blocks[index].lru;
 
+  // 모든 캐시 블록을 순회
   for (int i = 0; i < MAX_CACHE_BLOCK; i++)
   {
+    // 사용 중인 블록 중에서 접근한 블록보다 이전에 사용된 블록 (LRU 값이 더 작은 경우)
     if (cache.blocks[i].used && cache.blocks[i].lru < old)
-      cache.blocks[i].lru++;
+      cache.blocks[i].lru++; // 이 블록의 LRU값을 증가시켜 덜 최근에 사용 되었음을 표시
   }
   
+  // 접근한 블록의 LRU 값을 0으로 설정 -> 가장 최근에 사용된 블록
   cache.blocks[index].lru = 0;
 }
 
+/// @brief 새로운 데이터를 캐시에 삽입
+/// @param uri 요청된 객체의 URI
+/// @param buf 객체 버퍼
+/// @param size 객체 데이터 크기
 void cache_insert(char *uri, char *buf, size_t size)
 {
+  // 객체 크기가 너무 크면 리턴 -> 예외처리
   if (size > MAX_OBJECT_SIZE)
     return;
   
+  // 쓰기 락 획득 (다른 쓰기 / 읽기 차단)
   pthread_rwlock_wrlock(&cache.lock);
 
-  int evict_index = -1;
-  int max_lru = -1;
+  int evict_index = -1; // 데이터를 삽입할 블록의 인덱스
+  int max_lru = -1; // 가장 오래된 블록을 찾기 위한 변수
 
+  // 캐시 블록 순회
   for (int i = 0; i < MAX_CACHE_BLOCK; i++)
   {
+    // 캐시 블록 중 사용되지 않은 블록을 찾기
     if (!cache.blocks[i].used)
     {
       evict_index = i;
       break;
     }
 
+    // 사용 중인 블록 중 가장 오래된 블록 찾기 (LRU 값이 가장 큰 값)
     if (cache.blocks[i].lru > max_lru)
     {
       max_lru = cache.blocks[i].lru;
@@ -340,27 +368,32 @@ void cache_insert(char *uri, char *buf, size_t size)
     }
   }
 
+  // 삽입할 블록을 찾지 못하면
   if (evict_index == -1)
   {
-    pthread_rwlock_unlock(&cache.lock);
+    pthread_rwlock_unlock(&cache.lock); // 락 풀고 종료
     return;
   }
 
+  // 기존 사용 중인 블록이라면, 총 캐시 크기에서 제거
   if (cache.blocks[evict_index].used)
     cache.total_size -= cache.blocks[evict_index].size;
 
+  // 선택된 블록에 새 데이터 저장
   cache.blocks[evict_index].used = 1;
-  strcpy(cache.blocks[evict_index].uri, uri);
-  memcpy(cache.blocks[evict_index].buf, buf, size);
-  cache.blocks[evict_index].size = size;
-  cache_update_lru(evict_index);
-  cache.total_size += size;
+  strcpy(cache.blocks[evict_index].uri, uri);       // URI 저장
+  memcpy(cache.blocks[evict_index].buf, buf, size); // 데이터 복사
+  cache.blocks[evict_index].size = size;            // 크기 저장
+  cache_update_lru(evict_index);                    // LRU 갱신
+  cache.total_size += size;                         // 총 캐시 크기 증가
 
+  // 총 캐시 크기가 허용 크기를 넘으면 오래된 블록부터 제거
   while (cache.total_size > MAX_CACHE_SIZE)
   {
     int del_index = -1;
     int max_lru = -1;
 
+    // 가장 오래된 블록 찾기
     for (int i = 0; i < MAX_CACHE_BLOCK; i++)
     {
       if (cache.blocks[i].used && cache.blocks[i].lru > max_lru)
@@ -370,12 +403,15 @@ void cache_insert(char *uri, char *buf, size_t size)
       }
     }
     
+    // 삭제할 블록이 없으면 종료
     if (del_index == -1)
       break;
     
+    // 선택된 블록 제거
     cache.total_size -= cache.blocks[del_index].size;
     cache.blocks[del_index].used = 0;
   }
 
+  // 쓰기 락 해제
   pthread_rwlock_unlock(&cache.lock);
 }
