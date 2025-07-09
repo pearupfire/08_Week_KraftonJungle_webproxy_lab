@@ -3,6 +3,7 @@
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
+#define MAX_CACHE_BLOCK 10
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -11,8 +12,29 @@ static const char *user_agent_hdr =
 
 void proxy(int fd);
 void build_http_request(char *http_request, char *hostname, char *path, rio_t *client_rio);
-int parse_uri(char *uri, char *hostname, char *path, char *port);
+int parse_uri(const char *uri, char *hostname, char *path, char *port);
 void *thread(void *vargp);
+void cache_insert(char *uri, char *buf, size_t size);
+void cache_update_lru(int index);
+int cache_find(char *uri, char *buf, size_t * size);
+void cache_init();
+
+typedef struct {
+  char uri[MAXLINE];
+  char buf[MAX_OBJECT_SIZE];
+  size_t size;
+  int used;
+  int lru;
+} cache_block;
+
+typedef struct {
+  cache_block blocks[MAX_CACHE_BLOCK];
+  size_t total_size;
+  pthread_rwlock_t lock;
+} cache_t;
+
+cache_t cache;
+
 
 // /// @brief main 함수 서버 소켕 열고 클라이언트 연결을 받아 proxy 함수로 처리
 // /// @param argc 인자 개수 
@@ -52,15 +74,17 @@ int main(int argc, char **argv)
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
-  pthread_t tid; // 생성할 새 쓰레드 ID 저장할 변수 ++
+  pthread_t tid; // 생성할 새 쓰레드 ID 저장할 변수
+
 
   // 인자 개수 확안
   if (argc != 2)
   {
-    fprintf(stderr, "usage: %s <p.ort>\n", argv[0]);
+    fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
 
+  cache_init();
   // 지정 포트 번호로 리슨 소켓 생성 및 초기화
   listenfd = Open_listenfd(argv[1]);
   
@@ -89,12 +113,17 @@ void proxy(int fd)
   char http_request[MAXLINE]; // 서버에 보낼 HTTP 요청 메시지 저장할 버퍼
   int serverfd; // 서버와 연결할 소켓 디스크립터
   rio_t client_rio, server_rio; // 클라이언트, 서버 RIO
+  char cache_buf[MAX_OBJECT_SIZE];
+  size_t cache_size = 0;
+
 
   Rio_readinitb(&client_rio, fd); // 클라이언트와의 연결을 RIO 버퍼로 초기화
   Rio_readlineb(&client_rio, buf, MAXLINE); // 클라리언트로부터 요청 라인을 읽어옴
   printf("Request header: \n");
   printf("%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version); // 요청 라인 파싱
+
+
 
   if (strcasecmp(method, "GET")) // GET이 아니라면
   {
@@ -107,6 +136,12 @@ void proxy(int fd)
   {
     sprintf(buf, "Proxy could not parse URI: %s\r\n", uri);
     Rio_writen(fd, buf, strlen(buf)); // 실패 시 에러
+    return;
+  }
+  
+    if (cache_find(uri, cache_buf, &cache_size) == 0)
+  {
+    Rio_writen(fd, cache_buf, cache_size);
     return;
   }
 
@@ -124,13 +159,28 @@ void proxy(int fd)
   Rio_writen(serverfd, http_request, strlen(http_request)); // 생성한 요청 메시지를 서버에 전송
 
   size_t n;
+  size_t object_len = 0;
+  char object_buf[MAX_OBJECT_SIZE];
 
   // 서버로부터 한 줄씩 응답을 읽어 buf에 저장 클라이언트로 전달
-  while ((n = Rio_readlineb(&server_rio, buf, MAXLINE)) > 0) 
+  while ((n = Rio_readnb(&server_rio, buf, MAXLINE)) > 0) 
   {
     Rio_writen(fd, buf, n); // 응답의 각 줄을 클라이언트로 전달
+
+    if (object_len + n <= MAX_OBJECT_SIZE)
+    {
+      memcpy(object_buf + object_len, buf, n);
+      object_len += n;
+    }
+    else
+    {
+      object_len = MAX_OBJECT_SIZE + 1;
+    }
   }
 
+  if (object_len <= MAX_OBJECT_SIZE)
+    cache_insert(uri, object_buf, object_len);
+    
   Close(serverfd);
 }
 
@@ -178,43 +228,33 @@ void build_http_request(char *http_request, char *hostname, char *path, rio_t *c
 /// @param path 파싱된 경로 저장 버퍼
 /// @param port 파싱된 포트 저장 버퍼
 /// @return 성공 시 0, 실패 시 -1
-int parse_uri(char *uri, char *hostname, char *path, char *port)
-{
-  char *hostbegin, *hostend, *pathbegin, *portbegin;
+int parse_uri(const char *uri, char *hostname, char *path, char *port) {
+    char uri_copy[MAXLINE];
+    strcpy(uri_copy, uri);
 
-  // URI가 http://로 시작하는지 검사
-  if (strncasecmp(uri, "http://", 7) != 0)
-    return -1;
-  
-  hostbegin = uri + 7;                  // http:// 다음부터 hostname 부분 시작  uri + 7 = http:// 글자 건너뛰기
-  pathbegin = strchr(hostbegin, '/');   // hostname 뒤에 경로가 시작하는 / 문자 찾기
+    if (strncasecmp(uri_copy, "http://", 7) != 0)
+        return -1;
 
-  if (pathbegin != NULL) // / 가 있다면
-  {
-    strcpy(path, pathbegin); // path에 / 부터 끝까지 복사
-    *pathbegin = '\0';       // hostname 문자열 끝에 \0 추가해서 자르기
-  }
-  else // / 가 없다면
-  {
-    strcpy(path, "/"); // 기본 경로는 /
-  }
+    char *hostbegin = uri_copy + 7;
+    char *pathbegin = strchr(hostbegin, '/');
+    if (pathbegin) {
+        strcpy(path, pathbegin);
+        *pathbegin = '\0';
+    } else {
+        strcpy(path, "/");
+    }
 
-  // hostname에서 : 문자를 찾아 포트번호 여부 확인
-  portbegin = strchr(hostbegin, ':');
+    char *portbegin = strchr(hostbegin, ':');
+    if (portbegin) {
+        *portbegin = '\0';
+        strcpy(hostname, hostbegin);
+        strcpy(port, portbegin + 1);
+    } else {
+        strcpy(hostname, hostbegin);
+        strcpy(port, "80");
+    }
 
-  if (portbegin != NULL) // : 있다면
-  {
-    *portbegin = '\0';           // hostname 끝 자르기
-    strcpy(hostname, hostbegin); // hostname 복사
-    strcpy(port, portbegin + 1); // : 뒤부터 포트 복사
-  }
-  else // : 없다면 
-  {
-    strcpy(hostname, hostbegin); // hostname 전체 복사
-    strcpy(port, "80");          // 기본 포트는 80으로 설정
-  }
-
-  return 0; // 성공 시 0
+    return 0;
 }
 
 /// @brief 클라이언트 연결을 처리하는 스레드 함수
@@ -230,4 +270,112 @@ void *thread(void *vargp)
   proxy(connfd); // 클라이언터 연결
   Close(connfd); // 클라이언트와 연결된 소켓 닫기
   return NULL;
+}
+
+void cache_init() 
+{
+  cache.total_size = 0;
+  pthread_rwlock_init(&cache.lock, NULL);
+
+  for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+    cache.blocks[i].used = 0;
+}
+
+int cache_find(char *uri, char *buf, size_t * size)
+{
+  int found = -1;
+  pthread_rwlock_rdlock(&cache.lock);
+
+  for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+  {
+    if (cache.blocks[i].used && strcmp(cache.blocks[i].uri, uri) == 0)
+    {
+      memcpy(buf, cache.blocks[i].buf, cache.blocks[i].size);
+      *size = cache.blocks[i].size;
+      cache_update_lru(i);
+      found = 0; 
+      break;
+    }
+  }
+  
+  pthread_rwlock_unlock(&cache.lock);
+  return found;
+}
+
+void cache_update_lru(int index)
+{
+  int old = cache.blocks[index].lru;
+
+  for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+  {
+    if (cache.blocks[i].used && cache.blocks[i].lru < old)
+      cache.blocks[i].lru++;
+  }
+  
+  cache.blocks[index].lru = 0;
+}
+
+void cache_insert(char *uri, char *buf, size_t size)
+{
+  if (size > MAX_OBJECT_SIZE)
+    return;
+  
+  pthread_rwlock_wrlock(&cache.lock);
+
+  int evict_index = -1;
+  int max_lru = -1;
+
+  for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+  {
+    if (!cache.blocks[i].used)
+    {
+      evict_index = i;
+      break;
+    }
+
+    if (cache.blocks[i].lru > max_lru)
+    {
+      max_lru = cache.blocks[i].lru;
+      evict_index = i;
+    }
+  }
+
+  if (evict_index == -1)
+  {
+    pthread_rwlock_unlock(&cache.lock);
+    return;
+  }
+
+  if (cache.blocks[evict_index].used)
+    cache.total_size -= cache.blocks[evict_index].size;
+
+  cache.blocks[evict_index].used = 1;
+  strcpy(cache.blocks[evict_index].uri, uri);
+  memcpy(cache.blocks[evict_index].buf, buf, size);
+  cache.blocks[evict_index].size = size;
+  cache_update_lru(evict_index);
+  cache.total_size += size;
+
+  while (cache.total_size > MAX_CACHE_SIZE)
+  {
+    int del_index = -1;
+    int max_lru = -1;
+
+    for (int i = 0; i < MAX_CACHE_BLOCK; i++)
+    {
+      if (cache.blocks[i].used && cache.blocks[i].lru > max_lru)
+      {
+        max_lru = cache.blocks[i].lru;
+        del_index = i;
+      }
+    }
+    
+    if (del_index == -1)
+      break;
+    
+    cache.total_size -= cache.blocks[del_index].size;
+    cache.blocks[del_index].used = 0;
+  }
+
+  pthread_rwlock_unlock(&cache.lock);
 }
